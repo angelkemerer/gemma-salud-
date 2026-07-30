@@ -92,14 +92,31 @@ def _render_tarjeta_derivacion(derivacion: dict) -> None:
     st.success("Ya tenemos tu derivación lista")
     st.markdown(f"### {icono} Nivel de triaje: {derivacion['nivel_triaje'].capitalize()}")
 
+    etiquetas_complejidad = {1: "Centro de atención primaria", 2: "Hospital general", 3: "Alta complejidad"}
+    estado_icono = "🟢 Disponible" if derivacion.get("estado_operativo") != "SATURATED" else "🔴 Saturado"
+    tiempos = derivacion["tiempos"]
+
     st.markdown(f"""
 **Guardia recomendada:** {derivacion['guardia_nombre']}
 **Dirección:** {derivacion['direccion']}
-**Distancia:** {derivacion['distancia_km']} km (~{derivacion['minutos_viaje']:.0f} min de viaje)
-**Espera estimada:** {derivacion['espera_estimada_min']:.0f} min
-**Hora estimada de llegada sugerida:** {derivacion['hora_estimada_llegada']}
+**Distancia:** {derivacion['distancia_km']} km (~{tiempos['viaje_min']:.0f} min de viaje)
+**Llegada estimada al centro:** {tiempos['hora_llegada_legible']}
+**Espera en sala (una vez que llegues):** {tiempos['espera_en_sala_min']:.0f} min
+**Hora estimada en la que te atenderían:** {tiempos['hora_atencion_estimada_legible']}
+**Complejidad del centro:** {etiquetas_complejidad.get(derivacion.get('nivel_complejidad'), '—')}
+**Estado del centro:** {estado_icono}
 """)
 
+    cantidad_medicos = derivacion.get("medicos_disponibles_cantidad")
+    nombres_medicos = derivacion.get("medicos_disponibles_nombres") or []
+
+    if cantidad_medicos is not None:
+        with st.expander(f"👨‍⚕️ Médicos disponibles ahora ({cantidad_medicos})"):
+            if nombres_medicos:
+                for m in nombres_medicos:
+                    st.write(f"- {m['nombre']} — {m['especialidad']}")
+            else:
+                st.caption("Cantidad disponible según el sistema, sin nómina detallada para este centro.")
     st.link_button("📍 Abrir en Google Maps", derivacion["link_maps"])
     st.caption(derivacion["razon"])
 

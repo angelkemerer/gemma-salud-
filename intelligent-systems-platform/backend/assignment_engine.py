@@ -5,8 +5,18 @@ Algoritmo de asignación de guardias: 100% determinístico, sin IA.
 Calcula un score por guardia candidata y devuelve el ranking completo
 (no solo el ganador), para que triage_agent.py pueda pasárselo a
 Gemma y que el modelo valide o corrija la elección según el contexto
-clínico (ver ARQUITECTURA_TRIAGE.md, sección 6, para la fórmula y los
-pesos elegidos).
+clínico (ver ARQUITECTURA_TRIAGE.md, sección 6, para la fórmula base).
+
+Variables que entran en juego (en orden de aplicación):
+1. Especialidad requerida  -> filtro duro (excluye, salvo que nadie la tenga).
+2. Complejidad del centro  -> filtro duro solo para ROJO/NARANJA (un caso
+   crítico no debería ir a un centro de baja complejidad si hay uno de
+   mayor complejidad disponible con la especialidad necesaria).
+3. Distancia (Haversine)   -> siempre pesa.
+4. Espera / ocupación / médicos disponibles -> datos reales de
+   hospital_status.json cuando existen (ver database.sincronizar_estado_hospitales),
+   si no, heurística propia por cola_por_nivel.
+5. Estado operativo SATURATED -> penalización dura adicional.
 """
 
 from __future__ import annotations
@@ -21,8 +31,16 @@ from backend.models import ATENCION_PROM_MIN, NivelTriaje, ORDEN_PRIORIDAD_TRIAJ
 PESO_VIAJE = 1.0
 PESO_ESPERA = 1.0
 PESO_SATURACION = 2.0
+PENALIZACION_ESTADO_SATURATED = 60.0  # penalización dura fija (minutos "virtuales")
 UMBRAL_SATURACION_PCT = 85
 VELOCIDAD_URBANA_KMH = 30
+
+# Para casos críticos (ROJO/NARANJA), complejidad mínima exigida al centro
+# (1=centro barrial, 2=hospital general, 3=alta complejidad/todas las herramientas).
+COMPLEJIDAD_MINIMA_POR_NIVEL = {
+    NivelTriaje.ROJO: 2,
+    NivelTriaje.NARANJA: 2,
+}
 
 
 def _distancia_km(coord_a: tuple[float, float], coord_b: tuple[float, float]) -> float:
@@ -40,11 +58,15 @@ def _distancia_km(coord_a: tuple[float, float], coord_b: tuple[float, float]) ->
 
 
 def _espera_estimada_min(guardia: dict, nivel_paciente: NivelTriaje) -> float:
-    """Heurística: minutos hasta ser atendido según cuántos pacientes
-    más urgentes hay delante, repartido entre el personal de clínica
-    general disponible (proxy de capacidad general del centro)."""
+    """Devuelve la espera estimada en minutos. Prioriza el dato REAL
+    (estimated_wait, sincronizado desde hospital_status.json) por sobre
+    la heurística propia calculada a partir de cola_por_nivel."""
+    if guardia.get("estimated_wait") is not None:
+        return float(guardia["estimated_wait"])
+
+    # Fallback: heurística propia (para guardias sin dato real sincronizado).
     cola = guardia["cola_por_nivel"]
-    medicos = max(guardia["especialidades"].get("clinica", 1), 1)
+    medicos = max(guardia.get("available_doctors") or guardia["especialidades"].get("clinica", 1), 1)
     idx_paciente = ORDEN_PRIORIDAD_TRIAJE.index(nivel_paciente)
 
     minutos = 0.0
@@ -59,13 +81,18 @@ def _espera_estimada_min(guardia: dict, nivel_paciente: NivelTriaje) -> float:
     return round(minutos / medicos, 1)
 
 
-def _penalizacion_saturacion(ocupacion_pct: int) -> float:
-    """Crece de forma no lineal por encima del umbral, para evitar
-    mandar más gente a un centro ya colapsado aunque esté cerca."""
-    if ocupacion_pct < UMBRAL_SATURACION_PCT:
-        return 0.0
-    exceso = ocupacion_pct - UMBRAL_SATURACION_PCT
-    return (exceso ** 1.5)  # crecimiento no lineal
+def _penalizacion_saturacion(guardia: dict) -> float:
+    """Combina dos señales: la ocupación porcentual (crece de forma no
+    lineal por encima del umbral) y el estado operativo explícito
+    ('SATURATED' en hospital_status.json), que suma una penalización
+    dura adicional aunque el % de ocupación todavía no sea extremo."""
+    ocupacion_pct = guardia["ocupacion_pct"]
+    penalizacion = 0.0
+    if ocupacion_pct >= UMBRAL_SATURACION_PCT:
+        penalizacion += (ocupacion_pct - UMBRAL_SATURACION_PCT) ** 1.5
+    if guardia.get("estado_operativo") == "SATURATED":
+        penalizacion += PENALIZACION_ESTADO_SATURATED
+    return penalizacion
 
 
 def calcular_ranking(
@@ -74,42 +101,46 @@ def calcular_ranking(
     especialidad_requerida: Optional[str] = None,
 ) -> list[dict]:
     """Devuelve el ranking de guardias candidatas, de mejor a peor
-    opción. Las guardias que no tienen la especialidad requerida se
-    EXCLUYEN del ranking (restricción dura, no un costo más).
+    opción.
 
-    Excepción: si nivel_triaje es ROJO, se ignora la restricción de
-    saturación/score y se prioriza directamente la guardia más cercana
-    con capacidad de emergencia (regla dura de seguridad clínica).
+    Filtros duros aplicados en orden:
+    1. Especialidad requerida (si ninguna la tiene, no se excluye a
+       nadie, para que Gemma pueda avisar que no hay cobertura).
+    2. Complejidad mínima para ROJO/NARANJA (si ninguna la cumple,
+       tampoco se excluye a nadie: es preferible una opción imperfecta
+       a ninguna opción).
     """
     guardias = listar_guardias()
+    candidatas = guardias
 
     if especialidad_requerida:
-        candidatas = [g for g in guardias if g["especialidades"].get(especialidad_requerida, 0) > 0]
-        if not candidatas:
-            # Ninguna guardia tiene la especialidad: se devuelve igual
-            # el ranking completo (sin excluir), marcado explícitamente,
-            # para que Gemma pueda avisarle al paciente que no hay
-            # cobertura y sugerir la alternativa menos mala.
-            candidatas = guardias
-    else:
-        candidatas = guardias
+        con_especialidad = [g for g in candidatas if g["especialidades"].get(especialidad_requerida, 0) > 0]
+        if con_especialidad:
+            candidatas = con_especialidad
+
+    complejidad_minima = COMPLEJIDAD_MINIMA_POR_NIVEL.get(nivel_triaje)
+    if complejidad_minima is not None:
+        con_complejidad = [g for g in candidatas if g["nivel_complejidad"] >= complejidad_minima]
+        if con_complejidad:
+            candidatas = con_complejidad
 
     ranking = []
     for g in candidatas:
         distancia = _distancia_km(ubicacion_paciente, (g["lat"], g["lon"]))
         minutos_viaje = (distancia / VELOCIDAD_URBANA_KMH) * 60
         espera = _espera_estimada_min(g, nivel_triaje)
-        penalizacion = _penalizacion_saturacion(g["ocupacion_pct"])
+        penalizacion = _penalizacion_saturacion(g)
 
-        if nivel_triaje == NivelTriaje.ROJO:
-            # Emergencia real: el score se basa solo en cercanía.
-            score = minutos_viaje
-        else:
-            score = (
-                PESO_VIAJE * minutos_viaje
-                + PESO_ESPERA * espera
-                + PESO_SATURACION * penalizacion
-            )
+        score = (
+            PESO_VIAJE * minutos_viaje
+            + PESO_ESPERA * espera
+            + PESO_SATURACION * penalizacion
+        )
+
+        medicos_nombres = g.get("medicos_nombres") or []
+        # Cantidad: si hay nombres cargados (dato del .txt), se usa esa
+        # cantidad; si no, se cae al número real de hospital_status.json.
+        medicos_cantidad = len(medicos_nombres) if medicos_nombres else g.get("available_doctors")
 
         ranking.append({
             "guardia_id": g["id"],
@@ -121,9 +152,16 @@ def calcular_ranking(
             "minutos_viaje": round(minutos_viaje, 0),
             "espera_estimada_min": espera,
             "ocupacion_pct": g["ocupacion_pct"],
+            "estado_operativo": g.get("estado_operativo", "AVAILABLE"),
+            "medicos_disponibles_cantidad": medicos_cantidad,
+            "medicos_disponibles_nombres": medicos_nombres,
+            "nivel_complejidad": g["nivel_complejidad"],
             "tiene_especialidad": (
                 especialidad_requerida is None
                 or g["especialidades"].get(especialidad_requerida, 0) > 0
+            ),
+            "cumple_complejidad_minima": (
+                complejidad_minima is None or g["nivel_complejidad"] >= complejidad_minima
             ),
             "score_total_min": round(score, 1),
         })

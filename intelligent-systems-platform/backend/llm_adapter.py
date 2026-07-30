@@ -86,6 +86,33 @@ class LLMAdapter:
             # entendible. El Agent decide qué hacer con el error.
             raise LLMAdapterError(f"Error al comunicarse con el proveedor: {exc}") from exc
 
+    def generar_con_herramientas(
+        self,
+        mensajes: list[dict],
+        herramientas: list[dict],
+        tool_choice: str = "auto",
+        temperatura: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """Igual que generar_respuesta, pero habilitando function calling
+        (formato OpenAI 'tools'). Devuelve el objeto `message` completo
+        del SDK (no solo el texto), porque el llamador necesita poder
+        inspeccionar `.tool_calls` para saber si el modelo decidió
+        invocar una función en vez de responder en texto libre.
+        """
+        try:
+            respuesta = self._client.chat.completions.create(
+                model=self._model,
+                messages=mensajes,
+                tools=herramientas,
+                tool_choice=tool_choice,
+                temperature=temperatura if temperatura is not None else self._temperature,
+                max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
+            )
+            return respuesta.choices[0].message
+        except Exception as exc:  # noqa: BLE001
+            raise LLMAdapterError(f"Error al comunicarse con el proveedor (tools): {exc}") from exc
+
     def verificar_conexion(self) -> bool:
         """Chequeo liviano de que hay API key configurada.
 

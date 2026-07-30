@@ -1,18 +1,26 @@
 """
 triage_agent.py
 -----------------
-Orquestador del flujo completo de triaje conversacional. Reemplaza,
-para este dominio específico, al Agent genérico multi-módulo: acá
-Gemma SIEMPRE responde en el protocolo JSON definido en
-prompts/triage_chat.txt, hasta que decide que tiene información
-suficiente (listo=true). En ese momento:
+Orquestador del flujo completo de triaje conversacional.
 
+Etapa 1 (chat multi-turno): Gemma usa function calling real (formato
+OpenAI 'tools', ver backend/tools.py). Mientras junta información,
+responde en texto libre (una pregunta atómica por turno, según el
+prompt de prompts/triage_chat.txt). Cuando tiene información
+suficiente, en vez de responder en texto invoca la función
+`derive_patient` con los datos estructurados (nivel de triaje,
+especialidad, resumen clínico) — sin depender de que el modelo
+"recuerde" devolver un JSON bien formado a mano.
+
+Etapa 2 (cierre): al recibir el tool_call,
   1. Se geocodifica la ubicación declarada del paciente (mock simple
      por barrio; ver GEOCODIFICACION_BARRIOS más abajo).
   2. Se llama al AssignmentEngine (sin IA) para obtener el ranking de
-     guardias candidatas.
+     guardias candidatas (considerando distancia, ocupación/espera
+     reales, complejidad y especialidad).
   3. Se le pide a Gemma que valide o corrija el ranking, con el prompt
-     de prompts/triage_validacion.txt.
+     de prompts/triage_validacion.txt (acá sí se usa el protocolo JSON
+     en texto, es una llamada interna que no necesita function calling).
   4. Se persiste todo en la base de datos (database.cerrar_triaje).
 
 La UI (Streamlit) solo llama a TriageAgent.enviar_mensaje(...) y
@@ -31,6 +39,7 @@ from backend.assignment_engine import calcular_ranking
 from backend.llm_adapter import LLMAdapter, LLMAdapterError
 from backend.models import NivelTriaje
 from backend.prompt_manager import prompt_manager
+from backend.tools import DERIVE_PATIENT_TOOL, MAPEO_ESPECIALIDAD
 from backend import database
 
 # Geocodificación mock: barrio de Paraná mencionado en el texto -> coords.
@@ -96,25 +105,52 @@ class TriageAgent:
         mensajes = [{"role": "system", "content": prompt_sistema}] + historial
 
         try:
-            respuesta_cruda = self._llm.generar_respuesta(mensajes)
-            resultado = _extraer_json(respuesta_cruda)
-        except (LLMAdapterError, ValueError, json.JSONDecodeError) as exc:
+            mensaje_modelo = self._llm.generar_con_herramientas(
+                mensajes, herramientas=[DERIVE_PATIENT_TOOL], tool_choice="auto",
+            )
+        except LLMAdapterError as exc:
             return {"ok": False, "finalizado": False, "mensaje_para_mostrar": "",
                      "derivacion": None, "error": f"Error al procesar la respuesta del modelo: {exc}"}
 
-        historial.append({"role": "assistant", "content": resultado["mensaje_paciente"]})
-        database.actualizar_historial_chat(consulta_id, historial)
+        tool_calls = getattr(mensaje_modelo, "tool_calls", None)
 
-        if not resultado.get("listo", False):
+        if not tool_calls:
+            # El modelo todavía está juntando información: respondió en
+            # texto libre (la pregunta de seguimiento), no llamó a la función.
+            pregunta = mensaje_modelo.content or ""
+            historial.append({"role": "assistant", "content": pregunta})
+            database.actualizar_historial_chat(consulta_id, historial)
             return {
                 "ok": True, "finalizado": False,
-                "mensaje_para_mostrar": resultado["mensaje_paciente"],
+                "mensaje_para_mostrar": pregunta,
                 "derivacion": None, "error": None,
             }
 
-        # listo=True: tenemos nivel de triaje + especialidad. Calculamos
-        # la derivación (ranking sin IA + validación con IA).
-        return self._finalizar_triaje(consulta_id, consulta["paciente_id"], resultado)
+        # El modelo decidió que ya tiene información suficiente y
+        # activó derive_patient. Parseamos sus argumentos (schema
+        # garantizado por function calling, no requiere regex/heurística).
+        try:
+            argumentos = json.loads(tool_calls[0].function.arguments)
+        except (json.JSONDecodeError, AttributeError, IndexError) as exc:
+            return {"ok": False, "finalizado": False, "mensaje_para_mostrar": "",
+                     "derivacion": None, "error": f"Error al parsear derive_patient: {exc}"}
+
+        # Registramos en el historial que el modelo cerró el triaje
+        # (para que turnos futuros del chat, si los hubiera, tengan contexto).
+        historial.append({
+            "role": "assistant",
+            "content": f"[Triaje cerrado: {argumentos.get('triage_level')} — {argumentos.get('symptoms_summary')}]",
+        })
+        database.actualizar_historial_chat(consulta_id, historial)
+
+        resultado_triaje = {
+            "nivel_triaje": argumentos["triage_level"].lower(),
+            "especialidad_requerida": MAPEO_ESPECIALIDAD.get(argumentos["specialty"]),
+            "motivo_consulta_resumen": argumentos.get("symptoms_summary", ""),
+            "urgency_score": argumentos.get("urgency_score"),
+        }
+
+        return self._finalizar_triaje(consulta_id, consulta["paciente_id"], resultado_triaje)
 
     # ------------------------------------------------------------------
     # Cierre del triaje: ranking + validación por Gemma + persistencia
@@ -150,7 +186,16 @@ class TriageAgent:
             ranking[0],
         )
 
-        eta = datetime.now() + timedelta(minutes=elegida["minutos_viaje"] + elegida["espera_estimada_min"])
+        # Separamos explícitamente dos momentos distintos (antes se
+        # mezclaban en un solo "hora_estimada_llegada", lo que generaba
+        # datos ambiguos al consumir la API):
+        #   - hora_llegada:   cuándo el paciente llega FÍSICAMENTE al centro
+        #                     (ahora + tiempo de viaje).
+        #   - hora_atencion:  cuándo sería atendido, YA ESTANDO en el centro
+        #                     (hora_llegada + tiempo de espera en sala).
+        ahora = datetime.now()
+        hora_llegada = ahora + timedelta(minutes=elegida["minutos_viaje"])
+        hora_atencion = hora_llegada + timedelta(minutes=elegida["espera_estimada_min"])
 
         database.cerrar_triaje(
             consulta_id=consulta_id,
@@ -160,19 +205,33 @@ class TriageAgent:
             guardia_asignada_id=elegida["guardia_id"],
             score_calculado=elegida["score_total_min"],
             razon_gemma=validacion["razon_gemma"],
-            hora_estimada_llegada=eta.isoformat(),
+            hora_estimada_llegada=hora_llegada.isoformat(),
         )
 
         derivacion = {
             "guardia_nombre": elegida["nombre"],
             "direccion": elegida["direccion"],
             "distancia_km": elegida["distancia_km"],
-            "minutos_viaje": elegida["minutos_viaje"],
-            "espera_estimada_min": elegida["espera_estimada_min"],
-            "hora_estimada_llegada": eta.strftime("%H:%M"),
             "nivel_triaje": nivel_triaje.value,
             "link_maps": f"https://www.google.com/maps/dir/?api=1&destination={elegida['lat']},{elegida['lon']}",
             "razon": validacion["razon_gemma"],
+            "nivel_complejidad": elegida["nivel_complejidad"],
+            "estado_operativo": elegida["estado_operativo"],
+            "medicos_disponibles_cantidad": elegida.get("medicos_disponibles_cantidad"),
+            "medicos_disponibles_nombres": elegida.get("medicos_disponibles_nombres", []),
+            "tiempos": {
+                # Duraciones (siempre en minutos, tipo numérico, sin ambigüedad de formato).
+                "viaje_min": elegida["minutos_viaje"],
+                "espera_en_sala_min": elegida["espera_estimada_min"],
+                "total_min": round(elegida["minutos_viaje"] + elegida["espera_estimada_min"], 1),
+                # Timestamps ISO 8601 (para que cualquier consumidor de la
+                # API los parsee sin ambigüedad de zona horaria/formato).
+                "hora_llegada_iso": hora_llegada.isoformat(),
+                "hora_atencion_estimada_iso": hora_atencion.isoformat(),
+                # Versión legible para mostrar directo en UI.
+                "hora_llegada_legible": hora_llegada.strftime("%H:%M"),
+                "hora_atencion_estimada_legible": hora_atencion.strftime("%H:%M"),
+            },
         }
 
         return {

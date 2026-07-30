@@ -8,7 +8,7 @@ simplemente **agregar un módulo**, sin tocar el resto del sistema.
 ## Arquitectura
 
 ```
-.Streamlit (app.py + components/)
+Streamlit (app.py + components/)
         ↓  agente.consultar(pregunta, modulo, historial, archivos)
 Agent (backend/agent.py)
         ↓
