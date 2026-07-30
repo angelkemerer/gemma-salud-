@@ -1,4 +1,4 @@
-# TriageFlow Paraná
+# GEMMA Salúd 
 
 Sistema de triaje médico conversacional y derivación inteligente de
 pacientes a guardias/centros de salud, construido con **Gemma 4**
