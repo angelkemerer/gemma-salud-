@@ -13,8 +13,9 @@ especialidad, resumen clínico) — sin depender de que el modelo
 "recuerde" devolver un JSON bien formado a mano.
 
 Etapa 2 (cierre): al recibir el tool_call,
-  1. Se geocodifica la ubicación declarada del paciente (mock simple
-     por barrio; ver GEOCODIFICACION_BARRIOS más abajo).
+  1. Se geocodifica la ubicación declarada del paciente (backend/geocoding.py:
+     intenta una dirección real vía Nominatim, y si falla cae a un mock
+     offline por barrio, para que la demo nunca se trabe por falta de internet).
   2. Se llama al AssignmentEngine (sin IA) para obtener el ranking de
      guardias candidatas (considerando distancia, ocupación/espera
      reales, complejidad y especialidad).
@@ -40,26 +41,8 @@ from backend.llm_adapter import LLMAdapter, LLMAdapterError
 from backend.models import NivelTriaje
 from backend.prompt_manager import prompt_manager
 from backend.tools import DERIVE_PATIENT_TOOL, MAPEO_ESPECIALIDAD
+from backend.geocoding import geocodificar
 from backend import database
-
-# Geocodificación mock: barrio de Paraná mencionado en el texto -> coords.
-# TODO: reemplazar por geolocalización real del navegador/dispositivo.
-GEOCODIFICACION_BARRIOS = {
-    "centro": (-31.7333, -60.5238),
-    "zona norte": (-31.7000, -60.5050),
-    "san benito": (-31.7500, -60.5000),
-    "microcentro": (-31.7320, -60.5260),
-    "oro verde": (-31.8228, -60.5192),
-}
-UBICACION_DEFAULT = GEOCODIFICACION_BARRIOS["centro"]
-
-
-def _geocodificar(texto_ubicacion: str) -> tuple[float, float]:
-    texto = (texto_ubicacion or "").lower()
-    for barrio, coords in GEOCODIFICACION_BARRIOS.items():
-        if barrio in texto:
-            return coords
-    return UBICACION_DEFAULT
 
 
 def _extraer_json(texto: str) -> dict:
@@ -264,7 +247,7 @@ class TriageAgent:
                 "SELECT ubicacion_declarada FROM pacientes WHERE id = ?", (paciente_id,)
             ).fetchone()
         texto = fila["ubicacion_declarada"] if fila else ""
-        return _geocodificar(texto)
+        return geocodificar(texto)
 
 
 triage_agent = TriageAgent()

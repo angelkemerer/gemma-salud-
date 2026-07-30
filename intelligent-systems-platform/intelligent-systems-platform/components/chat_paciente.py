@@ -32,8 +32,10 @@ def _render_formulario_inicial() -> None:
     with st.form("form_inicio_consulta"):
         nombre = st.text_input("Tu nombre")
         ubicacion = st.text_input(
-            "¿En qué zona de Paraná estás? (ej: centro, zona norte, San Benito, microcentro)"
+            "¿Cuál es tu dirección o zona?",
+            placeholder="Ej: Alameda de la Federación 500, o 'zona norte', o 'Oro Verde'",
         )
+        st.caption("Cuanto más específica la dirección, mejor calculamos la distancia real a cada guardia.")
         motivo = st.text_area("Contanos qué te pasa")
         enviado = st.form_submit_button("Iniciar consulta")
 
