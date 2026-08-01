@@ -2,12 +2,15 @@
 llm_adapter.py
 --------------
 Única clase de todo el sistema que sabe cómo hablar con un proveedor
-de LLM concreto (hoy OpenRouter / Gemma 4).
+de LLM concreto (hoy Ollama local / Gemma 4 E4B).
 
-Si el día de mañana se cambia OpenRouter por Ollama, la API de Gemini
-o la API de Claude, ÚNICAMENTE este archivo debe modificarse. El resto
-de la plataforma (Agent, Module Manager, UI) no debe enterarse nunca
-del cambio.
+Ollama expone un endpoint HTTP compatible con la API de chat de
+OpenAI (http://localhost:11434/v1), así que reutilizamos el SDK
+`openai` apuntándolo a ese endpoint en vez de a la nube. Si el día de
+mañana se cambia Ollama por OpenRouter, la API de Gemini o la de
+Claude, ÚNICAMENTE este archivo (y config.py) deben modificarse. El
+resto de la plataforma (Agent, Module Manager, UI) no debe enterarse
+nunca del cambio.
 """
 
 from __future__ import annotations
@@ -27,8 +30,8 @@ class LLMAdapter:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
     ):
-        self._api_key = api_key or config.OPENROUTER_API_KEY
-        self._base_url = base_url or config.OPENROUTER_BASE_URL
+        self._api_key = api_key or config.LLM_API_KEY
+        self._base_url = base_url or config.LLM_BASE_URL
         self._model = model or config.DEFAULT_MODEL
         self._temperature = config.TEMPERATURE
         self._max_tokens = config.MAX_TOKENS
@@ -51,9 +54,10 @@ class LLMAdapter:
     def obtener_modelos(self) -> list[str]:
         """Devuelve la lista de modelos disponibles configurados.
 
-        (OpenRouter expone también un endpoint /models; se puede
-        reemplazar esta implementación estática por una consulta real
-        sin afectar al resto del sistema).
+        (Ollama expone también un endpoint /api/tags con los modelos
+        realmente descargados en la máquina; se puede reemplazar esta
+        implementación estática por una consulta real sin afectar al
+        resto del sistema).
         """
         return config.AVAILABLE_MODELS
 
@@ -114,13 +118,22 @@ class LLMAdapter:
             raise LLMAdapterError(f"Error al comunicarse con el proveedor (tools): {exc}") from exc
 
     def verificar_conexion(self) -> bool:
-        """Chequeo liviano de que hay API key configurada.
+        """Chequeo liviano de que el servidor de Ollama está arriba.
 
-        (No hace una llamada real para no gastar cuota en cada render
-        de la barra superior; el Agent puede forzar una llamada real
-        si se necesita un healthcheck estricto).
+        Con un proveedor local no tiene sentido chequear una api_key
+        (siempre hay una, aunque sea el valor dummy "ollama"): lo que
+        puede fallar es que `ollama serve` no esté corriendo. Golpea
+        el endpoint /api/tags (liviano, no genera tokens) con timeout
+        corto para no trabar la UI si el servicio está caído.
         """
-        return bool(self._api_key)
+        import requests
+
+        try:
+            base_sin_v1 = self._base_url.rstrip("/").removesuffix("/v1")
+            resp = requests.get(f"{base_sin_v1}/api/tags", timeout=2)
+            return resp.ok
+        except Exception:
+            return False
 
 
 class LLMAdapterError(Exception):

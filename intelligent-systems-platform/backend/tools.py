@@ -1,7 +1,8 @@
 """
 tools.py
 --------
-Definición de herramientas (function calling, formato OpenAI/OpenRouter)
+Definición de herramientas (function calling, formato OpenAI — el que
+también habla Ollama en su endpoint /v1)
 que usa TriageAgent. Separado del prompt de texto porque el schema debe
 viajar en el parámetro `tools` de la llamada al modelo, no en el system
 prompt.

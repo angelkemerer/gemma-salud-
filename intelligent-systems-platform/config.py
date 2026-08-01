@@ -3,7 +3,7 @@ config.py
 ---------
 Configuración centralizada de la plataforma.
 Nada debe estar hardcodeado en el resto del código: todo valor
-configurable (API keys, modelo, parámetros del LLM, rutas, etc.)
+configurable (endpoint del LLM, modelo, parámetros, rutas, etc.)
 vive aquí y se lee preferentemente desde variables de entorno.
 
 Para usar variables de entorno desde un archivo .env, instalar
@@ -24,21 +24,23 @@ except ImportError:
 
 class Config:
     # --- Proveedor / Modelo ---
-    PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter")
-    OPENROUTER_BASE_URL: str = os.getenv(
-        "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
-    )
-    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    DEFAULT_MODEL: str = os.getenv(
-        "DEFAULT_MODEL", "google/gemma-4-26b-a4b-it:free"
-    )
+    # Por defecto corre 100% local contra Ollama (sin API key, sin
+    # costo, sin depender de internet en la demo). Ollama expone un
+    # endpoint compatible con la API de OpenAI en /v1, por eso el
+    # resto del código (LLMAdapter) no cambia una línea.
+    PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+    # Ollama ignora la api_key, pero el cliente OpenAI exige un string
+    # no vacío. "ollama" es el valor convencional para eso.
+    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "ollama")
+    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemma4:e4b")
 
     # Modelos disponibles para mostrar/seleccionar en la UI.
-    # Se puede ampliar sin tocar el resto del sistema.
+    # Deben estar descargados localmente (`ollama pull <modelo>`).
     AVAILABLE_MODELS: list[str] = [
-        "google/gemma-4-26b-a4b-it:free",
-        "google/gemma-2-27b-it:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
+        "gemma4:e4b",
+        "gemma4:e2b",
+        "gemma3n:e4b",
     ]
 
     # --- Parámetros de generación ---
@@ -47,22 +49,12 @@ class Config:
     REQUEST_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "60"))
 
     # --- Plataforma ---
-    PLATFORM_NAME: str = os.getenv("PLATFORM_NAME", "Intelligent Systems Platform")
-    DEFAULT_MODULE: str = os.getenv("DEFAULT_MODULE", "stockhunter")
+    PLATFORM_NAME: str = os.getenv("PLATFORM_NAME", "TriageFlow Paraná")
 
     # --- Rutas ---
     BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
     PROMPTS_DIR: str = os.path.join(BASE_DIR, "prompts")
     HISTORY_DIR: str = os.path.join(BASE_DIR, "data")
-    HISTORY_FILE: str = os.path.join(HISTORY_DIR, "history.json")
-    STYLE_CSS: str = os.path.join(BASE_DIR, "styles", "style.css")
-    ASSETS_DIR: str = os.path.join(BASE_DIR, "assets")
-
-    # --- Archivos soportados (preparado, no todos implementados aún) ---
-    SUPPORTED_FILE_TYPES: list[str] = [
-        "pdf", "csv", "xlsx", "xls", "docx", "txt", "json",
-        "png", "jpg", "jpeg",
-    ]
 
 
 config = Config()

@@ -59,8 +59,9 @@ Streamlit (app.py + components/)
                    atención → Atendido)
 
 LLMAdapter (backend/llm_adapter.py) es la ÚNICA clase que sabe hablar
-con el proveedor del modelo (hoy OpenRouter/Gemma 4). Cambiar de
-proveedor (Ollama, otra API) implica tocar solo ese archivo.
+con el proveedor del modelo (hoy Ollama local, corriendo Gemma 4 E4B).
+Cambiar de proveedor (una API en la nube, otro modelo) implica tocar
+solo ese archivo y config.py.
 ```
 
 ### Por qué el ranking de centros no lo calcula el modelo
@@ -118,6 +119,11 @@ especialidad necesaria).
 ## Cómo correrlo
 
 ```bash
+# 0. Instalar Ollama (una sola vez) y bajar el modelo
+#    Ver https://ollama.com/download
+ollama pull gemma4:e4b
+ollama serve                   # deja este proceso corriendo aparte
+
 # 1. Crear entorno virtual
 python -m venv venv
 venv\Scripts\activate          # Windows
@@ -126,9 +132,10 @@ venv\Scripts\activate          # Windows
 # 2. Instalar dependencias
 pip install -r requirements.txt
 
-# 3. Configurar variables de entorno
+# 3. Configurar variables de entorno (opcional)
 cp .env.example .env
-# Editar .env y completar OPENROUTER_API_KEY (ver openrouter.ai/keys)
+# Los defaults ya apuntan a http://localhost:11434 — no hace falta
+# ninguna API key. Editar .env solo si Ollama corre en otro host/puerto.
 
 # 4. Correr la app
 streamlit run app.py
@@ -154,7 +161,7 @@ intelligent-systems-platform/
 │   ├── assignment_engine.py        # Algoritmo de ranking de centros (sin IA)
 │   ├── database.py                  # Persistencia SQLite + migraciones + carga de datos
 │   ├── geocoding.py                  # Geocoding real (Nominatim) con fallback offline
-│   ├── llm_adapter.py                 # Única clase que habla con OpenRouter/Gemma 4
+│   ├── llm_adapter.py                 # Única clase que habla con Ollama (Gemma 4 E4B)
 │   ├── tools.py                        # Schema de la función derive_patient (function calling)
 │   ├── prompt_manager.py                # Carga de prompts desde /prompts
 │   └── models.py                         # Enums: NivelTriaje, EstadoPaciente, máquina de estados
